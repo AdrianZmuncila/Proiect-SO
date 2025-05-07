@@ -1,116 +1,115 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
-int pipefd[2]; // 0: read, 1: write
 pid_t monitor_pid = -1;
+int monitor_running = 0;
+char command_file[] = "monitor_cmd.txt";
 
-void handle_sigusr1(int sig) {
-    char buffer[256];
-    int n = read(pipefd[0], buffer, sizeof(buffer));
-    if (n > 0) {
-        buffer[n] = '\0';
-
-        if (strcmp(buffer, "list_hunts") == 0) {
-            printf("---vanatori disponibile--\n");
-            system("ls -d */ 2>/dev/null | grep -v '^logged_hunt' | sed 's#/##'");
-        } else if (strncmp(buffer, "list_treasures ", 15) == 0) {
-            char cmd[300];
-            snprintf(cmd, sizeof(cmd), "./treasure_manager --list %s", buffer + 15);
-            system(cmd);
-        } else if (strncmp(buffer, "view_treasure ", 14) == 0) {
-            char hunt[100];
-            int id;
-            sscanf(buffer + 14, "%s %d", hunt, &id);
-            char cmd[300];
-            snprintf(cmd, sizeof(cmd), "./treasure_manager --view %s %d", hunt, id);
-            system(cmd);
-        } else if (strcmp(buffer, "stop") == 0) {
-            printf("monitorul se opreste...\n");
-            exit(0);
-        }
-    }
-}
-
-void start_monitor() {
-    if (pipe(pipefd) == -1) {
-        perror("eroare la pipe");
-        exit(1);
-    }
-
-    monitor_pid = fork();
-    if (monitor_pid == -1) {
-        perror("eroare la fork");
-        exit(1);
-    }
-
-    if (monitor_pid == 0) {
-        // procesul monitor
-        close(pipefd[1]); // inchide scrierea
-        signal(SIGUSR1, handle_sigusr1);
-        while (1) pause();
-    } else {
-        // procesul principal
-        close(pipefd[0]); // inchide citirea
-        printf("monitorul a fost pornit cu pid %d\n", monitor_pid);
-    }
-}
-
-void send_command(const char *cmd) {
-    if (monitor_pid == -1) {
-        printf("monitorul nu este pornit\n");
-        return;
-    }
-    write(pipefd[1], cmd, strlen(cmd));
-    kill(monitor_pid, SIGUSR1);
-}
-
-void stop_monitor() {
-    if (monitor_pid != -1) {
-        send_command("stop");
-        waitpid(monitor_pid, NULL, 0);
+void handle_sigchld(int sig) {
+    int status;
+    pid_t pid = waitpid(monitor_pid, &status, WNOHANG);
+    if (pid > 0) {
+        printf("[hub] monitorul s-a terminat cu status %d.\n", status);
+        monitor_running = 0;
         monitor_pid = -1;
     }
 }
 
+void send_signal_to_monitor(int signal) {
+    if (monitor_running) {
+        kill(monitor_pid, signal);
+    } else {
+        printf("[eroare] monitorul nu ruleaza.\n");
+    }
+}
+
+void write_command(const char *cmd) {
+    int fd = open(command_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        dprintf(fd, "%s\n", cmd);
+        close(fd);
+    } else {
+        perror("nu pot scrie in fisierul de comenzi");
+    }
+}
+
 int main() {
-    char line[256];
+    struct sigaction sa;
+    sa.sa_handler = handle_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    char input[256];
 
     while (1) {
-        printf("\n> ");
+        printf(">> ");
         fflush(stdout);
-        if (!fgets(line, sizeof(line), stdin)) break;
-        line[strcspn(line, "\n")] = '\0';
+        if (!fgets(input, sizeof(input), stdin)) break;
+        input[strcspn(input, "\n")] = 0;
 
-        if (strcmp(line, "start_monitor") == 0) {
-            start_monitor();
-        } else if (strcmp(line, "stop_monitor") == 0) {
-            stop_monitor();
-        } else if (strncmp(line, "list_hunts", 10) == 0) {
-            send_command("list_hunts");
-        } else if (strncmp(line, "list_treasures ", 15) == 0) {
-            send_command(line);
-        } else if (strncmp(line, "view_treasure ", 14) == 0) {
-            send_command(line);
-        } else if (strcmp(line, "exit") == 0) {
-            if (monitor_pid != -1) {
-                printf("inchide mai intai monitorul cu 'stop_monitor'\n");
+        if (strcmp(input, "start_monitor") == 0) {
+            if (monitor_running) {
+                printf("[eroare] monitorul deja ruleaza.\n");
+                continue;
+            }
+
+            monitor_pid = fork();
+            if (monitor_pid == 0) {
+                execlp("./monitor", "monitor", NULL);
+                perror("Eroare la exec monitor");
+                exit(1);
+            } else if (monitor_pid > 0) {
+                monitor_running = 1;
+                printf("[hub] monitorul a fost pornit cu PID %d.\n", monitor_pid);
+            } else {
+                perror("Eroare la fork pentru monitor");
+            }
+
+        } else if (strcmp(input, "stop_monitor") == 0 ||
+                   strcmp(input, "list_hunts") == 0 ||
+                   strncmp(input, "list_treasures", 14) == 0 ||
+                   strncmp(input, "view_treasure", 13) == 0) {
+            if (monitor_running) {
+                write_command(input);
+                send_signal_to_monitor(SIGUSR1);
+            } else {
+                printf("[eroare] monitorul nu este activ.\n");
+            }
+
+        } else if (strcmp(input, "exit") == 0) {
+            if (monitor_running) {
+                printf("[eroare] monitorul inca ruleaza.\n");
             } else {
                 break;
             }
+
         } else {
-            printf("comanda necunoscuta\n");
+            printf("[eroare] comanda necunoscuta.\n");
         }
+    }
+
+    if (monitor_running) {
+        kill(monitor_pid, SIGKILL);
+        waitpid(monitor_pid, NULL, 0);
     }
 
     return 0;
 }
-//start_monitor
-//list_hunts
-//list_treasure game1
-//wiew_treasure game1 1
-//stop_monitor
-//exitSSS
+
+
+/*  
+    -start_monitor
+    -list_hunts
+    -list_treasures game1
+    -view_treasure game1 1
+    -stop_monitor
+    -exit
+
+*/
