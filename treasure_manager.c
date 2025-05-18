@@ -3,8 +3,8 @@
 #include <string.h>     
 #include <unistd.h>     // pentru unlink, symlink, write, read, close
 #include <fcntl.h>      // pentru open, O_RDONLY, O_WRONLY 
-#include <sys/stat.h>   // pentru mkdir
-#include <time.h>       // pentru time (timestamp loguri)
+#include <sys/stat.h>   // pentru mkdir, stat
+#include <time.h>       // pentru time, localtime, strftime
 
 #define TREASURE_FILE "treasures.dat"
 #define LOG_FILE "logged_hunt"
@@ -67,16 +67,25 @@ void list_treasures(const char *hunt_id) {
 
     printf("Vanatoare: %s\n", hunt_id);
 
+    struct stat st;
+    if (stat(file_path, &st) == -1) {
+        perror("Eroare la obtinerea informatiilor despre fisier");
+        return;
+    }
+
+    //afisarea timpului ultimei modificari
+    char mod_time[64];
+    struct tm *tm_info = localtime(&st.st_mtime);
+    strftime(mod_time, sizeof(mod_time), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    printf("Dimensiune fisier: %ld bytes\n", st.st_size);
+    printf("Ultima modificare: %s\n", mod_time);
+
     int fd = open(file_path, O_RDONLY);
     if (fd < 0) {
         perror("Eroare la deschiderea fisierului de comori");
         return;
     }
-
-    off_t size = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
-
-    printf("Dimensiune fisier: %ld bytes\n", size);
 
     Treasure t;
     while (read(fd, &t, sizeof(Treasure)) > 0) {
@@ -184,14 +193,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (strcmp(argv[1], "--add") == 0 && argc == 8) {
+    if (strcmp(argv[1], "--add") == 0 && argc == 9) {
         Treasure t;
         t.id = atoi(argv[3]);
-        strncpy(t.username, argv[4], sizeof(t.username));
+        strncpy(t.username, argv[4], sizeof(t.username) - 1);
+        t.username[sizeof(t.username) - 1] = '\0';
         t.latitude = atof(argv[5]);
         t.longitude = atof(argv[6]);
-        strncpy(t.clue, argv[7], sizeof(t.clue));
-        t.value = rand() % 100;
+        t.value = atoi(argv[7]);
+        strncpy(t.clue, argv[8], sizeof(t.clue) - 1);
+        t.clue[sizeof(t.clue) - 1] = '\0';
+
         add_treasure(argv[2], t);
     } else if (strcmp(argv[1], "--list") == 0) {
         list_treasures(argv[2]);
@@ -209,9 +221,11 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-//gcc -o treasure_manager treasure_manager.c
-//./treasure_manager --add game1 1 user1 45.76 23.89 "primul indiciu"
-//./treasure_manager --list game1
-//./treasure_manager --view game1 1
-//./treasure_manager --remove_treasure game1 1
-//./treasure_manager --remove_hunt game1
+/*
+gcc -o treasure_manager treasure_manager.c
+./treasure_manager --add game1 1 user1 45.76 23.89 10 "primul indiciu"
+./treasure_manager --list game1
+./treasure_manager --view game1 1
+./treasure_manager --remove_treasure game1 1
+./treasure_manager --remove_hunt game1
+*/
